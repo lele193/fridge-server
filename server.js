@@ -1,0 +1,237 @@
+/**
+ * server.js —— 冰箱管家服务端（Node HTTP，适配 Railway 等普通容器平台）。
+ *
+ * 与云开发云函数版本的唯一实质差别在**怎么拿到原始请求体**：
+ *
+ *   云函数  event.body 是微信/腾讯云给的结构化字段
+ *   这里    必须是字节完全一致的原始 body
+ *
+ * 而验签算的就是这个 body 的字节。中间任何一次 JSON.parse +
+ * JSON.stringify 都会改变字节（键序、空格、转义），签名立刻对不上，
+ * 而 401 的报文长得跟密钥错误一模一样 —— 排查方向会被完全带偏。
+ *
+ * 所以这里手写 HTTP 解析并在任何解析之前把 body 存成字符串，
+ * 一个字节都不动。**不要为了图省事换 express。**
+ *
+ * 端点与固件 main/boards/zectrix-note4/proto.h 一一对应。
+ */
+
+const http = require('http');
+const { URL } = require('url');
+
+const auth = require('./lib/auth');
+const endpoints = require('./lib/endpoints');
+const { createRepo } = require('./lib/repo');
+
+/** 固件 net.c 的 BODY_MAX 是 256KB，这里留一点余量 */
+const MAX_BODY = 256 * 1024;
+
+const PORT = Number(process.env.PORT) || 8080;
+const LOG = process.env.LOG_LEVEL === 'debug';
+
+// ────────────────────────── 请求体收集 ──────────────────────────
+
+/**
+ * 把请求体读成**字符串**，不解析。
+ * @returns {Promise<{raw: string, truncated: boolean}>}
+ */
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let len = 0;
+    let truncated = false;
+
+    req.on('data', (c) => {
+      len += c.length;
+      if (len > MAX_BODY) {
+        // 超出上限就丢弃后续，但要把已收到的部分交出去，
+        // 让验签失败得明明白白而不是静默截断出一个更费解的签名不匹配
+        if (!truncated) truncated = true;
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve({ raw: Buffer.concat(chunks).toString('utf8'), truncated }));
+    req.on('error', reject);
+  });
+}
+
+// ────────────────────────── 响应 ──────────────────────────
+
+function sendJson(res, status, data, headers = {}) {
+  const body = Buffer.from(JSON.stringify(data), 'utf8');
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': body.length,
+    ...headers,
+  });
+  res.end(body);
+}
+
+/** 304 不能有 body，也不能有 Content-Length */
+function send304(res, nextPollSec) {
+  res.writeHead(304, {
+    'X-Next-Poll': String(nextPollSec),
+    'Cache-Control': 'no-store',
+  });
+  res.end();
+}
+
+// ────────────────────────── 路由 ──────────────────────────
+
+/**
+ * 端点表。auth=true 的走 HMAC 验签。
+ * 路径是 Express 风格：/device/sync 等。
+ */
+const ROUTES = {
+  'POST /device/pair': { auth: false },
+  'POST /device/bind': { auth: false },
+  'GET /device/sync': { auth: true },
+  'POST /device/op': { auth: true },
+  'POST /device/ack': { auth: true },
+  'POST /device/voice': { auth: true },
+};
+
+/**
+ * 处理一个请求，返回 { status, body, headers? } 或 304 描述。
+ * **不碰 res** —— 写响应是 createServer 的事，这样 304 才能被特殊处理。
+ */
+async function handle(req, repo) {
+  const started = Date.now();
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  } catch {
+    return { status: 400, body: { error: 'URL 无法解析' } };
+  }
+
+  // 路径归一到端点名，规则与固件 proto_route_of 一致（剥 /device 前缀与尾斜杠）
+  const route = auth.routeOf(url.pathname);
+  if (!route) {
+    return {
+      status: 404,
+      body: { error: `未知端点 ${url.pathname}`, hint: '应为 /device/{pair,bind,sync,op,ack,voice}' },
+    };
+  }
+
+  const method = req.method.toUpperCase();
+  // 直接查「方法 + 端点名」，路径前缀用不用都无所谓
+  const entry = ROUTES[`${method} /device${route}`];
+
+  if (!entry) {
+    const want = route === '/sync' ? 'GET' : 'POST';
+    return { status: 405, body: { error: `${route} 不接受 ${method}`, hint: `应为 ${want}` } };
+  }
+
+  const { raw, truncated } = await readRawBody(req);
+  if (truncated) {
+    return { status: 413, body: { error: '请求体过大' } };
+  }
+
+  // 固件把 body 指针原样传进签名：GET 时 body 是 NULL，参与签名的是空串
+  const signBody = raw || '';
+
+  let deviceId = null;
+  if (entry.auth) {
+    const result = await auth.verify({
+      header: req.headers.authorization,
+      method,
+      route,
+      body: signBody,
+      lookupSecret: async (id) => {
+        const d = await repo.getDevice(id);
+        return d ? d.secret : null;
+      },
+    });
+    if (!result.ok) {
+      console.error(`[auth] ${method} ${route} — ${result.reason}`);
+      return { status: 401, body: { error: 'unauthorized' } };
+    }
+    deviceId = result.deviceId;
+  }
+
+  // 签名通过之后才解析 JSON：解析失败说明对方发的是坏 JSON，
+  // 与鉴权无关，错误信息要能区分开
+  let body = {};
+  if (signBody) {
+    try {
+      body = JSON.parse(signBody);
+    } catch (err) {
+      return { status: 400, body: { error: `请求体不是合法 JSON: ${err.message}` } };
+    }
+  }
+
+  const query = Object.fromEntries(url.searchParams.entries());
+
+  const ctx = { method, route, raw: signBody, body, query, headers: req.headers, deviceId };
+  const result = await route_(route, ctx, repo);
+
+  if (LOG) {
+    console.log(`[${new Date().toISOString()}] ${method} ${url.pathname} → ${result.status} (${Date.now() - started}ms)`);
+  }
+  return result;
+}
+
+/** 分发到具体端点实现 */
+function route_(route, ctx, repo) {
+  switch (route) {
+    case '/pair':  return endpoints.pair(repo, ctx);
+    case '/bind':  return endpoints.bind(repo, ctx);
+    case '/sync':  return endpoints.sync(repo, ctx);
+    case '/op':    return endpoints.op(repo, ctx);
+    case '/ack':   return endpoints.ack(repo, ctx);
+    case '/voice': return endpoints.voice(repo, ctx);
+    default:       return { status: 404, body: { error: '未知端点' } };
+  }
+}
+
+// ────────────────────────── 启动 ──────────────────────────
+
+/**
+ * 包一层 http server：handle 只**返回**响应描述，写响应这一步在这里。
+ *
+ * 拆成两半是因为 304 的写法特殊：它没有 body，也不能有 Content-Length，
+ * 而端点函数不该关心这些传输层细节。
+ */
+function createServer(repo) {
+  return http.createServer(async (req, res) => {
+    try {
+      const r = await handle(req, repo);
+      if (!r) {
+        // handle 没返回东西说明已经自己写过响应了
+        if (!res.writableEnded) res.end();
+        return;
+      }
+      if (r.status === 304) return send304(res, r.nextPollSec);
+      sendJson(res, r.status, r.body, r.headers);
+    } catch (err) {
+      console.error('[server] 未捕获异常:', err);
+      if (!res.headersSent) {
+        sendJson(res, 500, { error: '服务端内部错误' });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
+    }
+  });
+}
+
+async function main() {
+  const repo = await createRepo();
+  const server = createServer(repo);
+
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`冰箱管家服务端已启动: http://0.0.0.0:${PORT}`);
+    console.log(`数据库: ${repo.kind}`);
+    if (process.env.RAILWAY_STATIC_URL) console.log(`Railway 域名: ${process.env.RAILWAY_STATIC_URL}`);
+  });
+}
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('启动失败:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { createServer, handle, readRawBody, MAX_BODY };
