@@ -4,3 +4,4 @@ data/
 .DS_Store
 .env
 .env.*
+tools/ghproxy_local.py
