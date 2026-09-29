@@ -6,7 +6,8 @@
     "start": "node server.js",
     "test": "node --test test/railway.test.js",
     "build:font": "node tools/build-font.js",
-    "preview:screen": "node tools/screen-preview.js"
+    "preview:screen": "node tools/screen-preview.js",
+    "check:charset": "node tools/check-charset.js"
   },
   "license": "ISC",
   "description": "冰箱管家服务端（Node HTTP，适配 Railway）",
