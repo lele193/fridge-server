@@ -206,3 +206,64 @@ test('生产入口能加载且不因缺 DATABASE_URL 崩溃', async () => {
   assert.ok(repo.kind === 'memory' || repo.kind === 'postgres');
   assert.strictEqual(typeof repo.listActiveItems, 'function');
 });
+
+/* ── 下面两条是「食材重复」和「删不掉」的回归测试 ──
+ *
+ * 之前两个 repo 都把数据库行（snake_case）原样透出去，而调用方读的是
+ * camelCase，于是 sync 回给固件的 expireAt / createdAt 恒为 0；
+ * 同时 id 一个是数字一个是字符串，delete / eaten 全部 missing:true。
+ * 表现就是：语音说删除没反应，食材越加越多。
+ */
+test('回归：sync 回的 expireAt / createdAt 不是 0', async (t) => {
+  const { server, port } = await startServer();
+  t.after(() => server.close());
+
+  const bound = await pairAndBind(port);
+  const now = Date.now();
+  const expireAt = now + 3 * 86400000;
+
+  const op = { opId: 'op-add-1', op: 'add', name: '鸡蛋', qty: 6, unit: '份', expireAt };
+  const { raw, auth: ah } = signedBody(bound.deviceSecret, String(now), 'POST', '/op', op);
+  const a = await request(port, 'POST', '/device/op', { body: raw, authHeader: ah });
+  assert.strictEqual(a.status, 200, a.text);
+
+  const ts = String(Date.now());
+  const { auth: sh } = signedBody(bound.deviceSecret, ts, 'GET', '/sync', null);
+  const s = await request(port, 'GET', '/device/sync', { authHeader: sh, query: { rev: '0', hash: '' } });
+
+  assert.strictEqual(s.status, 200, s.text);
+  assert.strictEqual(s.body.items.length, 1);
+  // 这两个字段曾经恒为 0，屏幕上的「放了 N 天」因此永远是 0
+  assert.strictEqual(s.body.items[0].expireAt, expireAt, 'expireAt 必须原样带回来');
+  assert.ok(s.body.items[0].createdAt > 0, 'createdAt 不能是 0');
+});
+
+test('回归：delete 用字符串 itemId 也能删掉（固件就是拿字符串回传的）', async (t) => {
+  const { server, port } = await startServer();
+  t.after(() => server.close());
+
+  const bound = await pairAndBind(port);
+  const now = Date.now();
+
+  const add = { opId: 'op-add-a', op: 'add', name: '牛奶', qty: 2, expireAt: now + 86400000 };
+  let { raw, auth: ah } = signedBody(bound.deviceSecret, String(now), 'POST', '/op', add);
+  await request(port, 'POST', '/device/op', { body: raw, authHeader: ah });
+
+  let ts = String(Date.now());
+  let { auth: sh } = signedBody(bound.deviceSecret, ts, 'GET', '/sync', null);
+  let s = await request(port, 'GET', '/device/sync', { authHeader: sh, query: { rev: '0', hash: '' } });
+  const item = s.body.items[0];
+  assert.ok(item.id, '应有 itemId');
+
+  // 固件从 sync 拿到的就是字符串，原样回传
+  const del = { opId: 'op-del-a', op: 'delete', itemId: String(item.id) };
+  ({ raw, auth: ah } = signedBody(bound.deviceSecret, String(Date.now()), 'POST', '/op', del));
+  const d = await request(port, 'POST', '/device/op', { body: raw, authHeader: ah });
+  assert.strictEqual(d.status, 200, d.text);
+  assert.notStrictEqual(d.body.missing, true, '以前这里恒为 missing:true，删除全部无效');
+
+  ts = String(Date.now());
+  ({ auth: sh } = signedBody(bound.deviceSecret, ts, 'GET', '/sync', null));
+  s = await request(port, 'GET', '/device/sync', { authHeader: sh, query: { rev: '0', hash: '' } });
+  assert.strictEqual(s.body.items.length, 0, '删掉之后不该还在列表里');
+});
