@@ -280,3 +280,75 @@ test('GET /healthz 免鉴权，并报出用的是哪种存储', async (t) => {
   assert.strictEqual(h.body.persistent, false);
   assert.ok(typeof h.body.uptimeSec === 'number');
 });
+
+/* ── 保质期：用户说了 vs 没说，是两条不同的路 ──
+ *
+ * 固件只在用户明确说了日子时才发 expireAt 字段（见 device.c
+ * device_op_add），没说就整个字段不出现，让云端补兜底值。
+ * 这里守住这两条路的结果确实不同。 */
+test('add：带 expireAt 就用它，不带就用兜底天数', async (t) => {
+  const { server, port } = await startServer();
+  t.after(() => server.close());
+
+  const bound = await pairAndBind(port);
+  const { DEFAULT_EXPIRY_DAYS } = require('../lib/repo');
+  const now = Date.now();
+  const said = now + 3 * 86400000;
+
+  const post = async (op) => {
+    const { raw, auth } = signedBody(
+      bound.deviceSecret, String(Date.now()), 'POST', '/op', op);
+    return request(port, 'POST', '/device/op', { body: raw, authHeader: auth });
+  };
+  const sync = async () => {
+    const ts = String(Date.now());
+    const { auth } = signedBody(bound.deviceSecret, ts, 'GET', '/sync', null);
+    const s = await request(port, 'GET', '/device/sync', {
+      authHeader: auth, query: { rev: '0', hash: '' },
+    });
+    return s.body.items;
+  };
+
+  // 用户说了「保质期三天」
+  await post({ opId: 'x1', op: 'add', name: '牛奶', qty: 1, expireAt: said });
+  // 用户没说 —— expireAt 字段整个不存在
+  await post({ opId: 'x2', op: 'add', name: '排骨', qty: 1 });
+  // 传了 0 / 垃圾值：同样当没提
+  await post({ opId: 'x3', op: 'add', name: '青菜', qty: 1, expireAt: 0 });
+  await post({ opId: 'x4', op: 'add', name: '豆腐', qty: 1, expireAt: '不是数字' });
+
+  const items = await sync();
+  const by = (n) => items.find((i) => i.name === n);
+  assert.ok(by('牛奶'), '牛奶应在列表里');
+  assert.ok(by('排骨'), '排骨应在列表里');
+
+  const d = (ms) => Math.round((ms - Date.now()) / 86400000);
+  assert.strictEqual(d(by('牛奶').expireAt), 3, '用户说了三天就该是三天');
+  // 兜底值 7 天，允许 ±1 天的执行耗时
+  assert.ok(Math.abs(d(by('排骨').expireAt) - DEFAULT_EXPIRY_DAYS) <= 1,
+    `没说保质期应落到兜底 ${DEFAULT_EXPIRY_DAYS} 天，实际 ${d(by('排骨').expireAt)}`);
+  assert.ok(Math.abs(d(by('青菜').expireAt) - DEFAULT_EXPIRY_DAYS) <= 1,
+    'expireAt=0 应当成「没提」');
+  assert.ok(Math.abs(d(by('豆腐').expireAt) - DEFAULT_EXPIRY_DAYS) <= 1,
+    '非数字应当成「没提」，不能存成 NaN');
+});
+
+test('add：不带 unit 时存的是「份」而不是乱码', async (t) => {
+  const { server, port } = await startServer();
+  t.after(() => server.close());
+
+  const bound = await pairAndBind(port);
+  const { raw, auth } = signedBody(bound.deviceSecret, String(Date.now()), 'POST', '/op',
+    { opId: 'u1', op: 'add', name: '鸡蛋', qty: 1 });
+  await request(port, 'POST', '/device/op', { body: raw, authHeader: auth });
+
+  const ts = String(Date.now());
+  const { auth: sh } = signedBody(bound.deviceSecret, ts, 'GET', '/sync', null);
+  const s = await request(port, 'GET', '/device/sync', {
+    authHeader: sh, query: { rev: '0', hash: '' },
+  });
+  const unit = s.body.items[0].unit;
+  // 固件早先的默认值是「ä»½」——中文被双重编码（UTF-8 字节当 Latin-1 又编了一次）
+  assert.ok(!/[\u00c0-\u00ff]/.test(unit), `unit 不该含拉丁扩展字符，实际是「${unit}」`);
+  assert.strictEqual(unit, '份');
+});
