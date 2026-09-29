@@ -281,17 +281,19 @@ test('GET /healthz 免鉴权，并报出用的是哪种存储', async (t) => {
   assert.ok(typeof h.body.uptimeSec === 'number');
 });
 
-/* ── 保质期：用户说了 vs 没说，是两条不同的路 ──
+/* ── 保质期：用户说了就显示倒计时，没说就只显示「放了 N 天」 ──
  *
  * 固件只在用户明确说了日子时才发 expireAt 字段（见 device.c
- * device_op_add），没说就整个字段不出现，让云端补兜底值。
- * 这里守住这两条路的结果确实不同。 */
-test('add：带 expireAt 就用它，不带就用兜底天数', async (t) => {
+ * device_op_add），没说就整个字段不出现。
+ *
+ * 早先服务端会兜底成「7 天后过期」，于是用户从没提过保质期的东西，
+ * 屏幕上会显示「还剩 7 天」—— 看着像系统知道，实际是凭空捏的日期，
+ * 一周后还会翻脸变成「已过期」。不猜比猜错好。 */
+test('add：没说保质期就是「没有」，不编一个到期日出来', async (t) => {
   const { server, port } = await startServer();
   t.after(() => server.close());
 
   const bound = await pairAndBind(port);
-  const { DEFAULT_EXPIRY_DAYS } = require('../lib/repo');
   const now = Date.now();
   const said = now + 3 * 86400000;
 
@@ -319,18 +321,25 @@ test('add：带 expireAt 就用它，不带就用兜底天数', async (t) => {
 
   const items = await sync();
   const by = (n) => items.find((i) => i.name === n);
-  assert.ok(by('牛奶'), '牛奶应在列表里');
-  assert.ok(by('排骨'), '排骨应在列表里');
 
-  const d = (ms) => Math.round((ms - Date.now()) / 86400000);
-  assert.strictEqual(d(by('牛奶').expireAt), 3, '用户说了三天就该是三天');
-  // 兜底值 7 天，允许 ±1 天的执行耗时
-  assert.ok(Math.abs(d(by('排骨').expireAt) - DEFAULT_EXPIRY_DAYS) <= 1,
-    `没说保质期应落到兜底 ${DEFAULT_EXPIRY_DAYS} 天，实际 ${d(by('排骨').expireAt)}`);
-  assert.ok(Math.abs(d(by('青菜').expireAt) - DEFAULT_EXPIRY_DAYS) <= 1,
-    'expireAt=0 应当成「没提」');
-  assert.ok(Math.abs(d(by('豆腐').expireAt) - DEFAULT_EXPIRY_DAYS) <= 1,
-    '非数字应当成「没提」，不能存成 NaN');
+  assert.strictEqual(by('牛奶').expireAt, said, '用户说了三天就该原样存三天');
+
+  for (const n of ['排骨', '青菜', '豆腐']) {
+    assert.strictEqual(by(n).expireAt, 0,
+      `${n} 没说保质期，expireAt 必须是 0（没有），不能编一个日期出来`);
+  }
+
+  /* 端到端确认：没说保质期的，屏幕上是「放了 N 天」而不是「还剩 N 天」。
+   * 0 会让 daysLeft 返回 null，renderHome 的三档里落到第三档。 */
+  const { renderHome } = require('../lib/screen');
+  const noDate = renderHome([{ ...by('排骨'), name: '排骨' }], {
+    now: Date.now(), household: '我家', total: 1, expiring: 0,
+  });
+  const hasDate = renderHome([{ ...by('牛奶'), name: '牛奶' }], {
+    now: Date.now(), household: '我家', total: 1, expiring: 1,
+  });
+  assert.notStrictEqual(noDate.hash, hasDate.hash,
+    '没保质期和有保质期必须渲染成不同的位图');
 });
 
 test('add：不带 unit 时存的是「份」而不是乱码', async (t) => {
