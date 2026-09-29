@@ -267,3 +267,16 @@ test('回归：delete 用字符串 itemId 也能删掉（固件就是拿字符�
   s = await request(port, 'GET', '/device/sync', { authHeader: sh, query: { rev: '0', hash: '' } });
   assert.strictEqual(s.body.items.length, 0, '删掉之后不该还在列表里');
 });
+
+test('GET /healthz 免鉴权，并报出用的是哪种存储', async (t) => {
+  const { server, port } = await startServer();
+  t.after(() => server.close());
+
+  const h = await request(port, 'GET', '/healthz');
+  assert.strictEqual(h.status, 200, h.text);
+  assert.strictEqual(h.body.ok, true);
+  // 测试用内存实现，所以是 memory / persistent:false
+  assert.strictEqual(h.body.store, 'memory');
+  assert.strictEqual(h.body.persistent, false);
+  assert.ok(typeof h.body.uptimeSec === 'number');
+});

@@ -26,6 +26,10 @@ const { createRepo } = require('./lib/repo');
 /** 固件 net.c 的 BODY_MAX 是 256KB，这里留一点余量 */
 const MAX_BODY = 256 * 1024;
 
+/* 进程启动时刻。放进 /healthz 是为了对比 uptimeSec —— uptime 归零就说明
+ * Railway 刚重新部署过；两次查询之间数据还在，才真的说明落库了。 */
+const STARTED_AT_ISO = new Date().toISOString();
+
 const PORT = Number(process.env.PORT) || 8080;
 const LOG = process.env.LOG_LEVEL === 'debug';
 
@@ -104,6 +108,28 @@ async function handle(req, repo) {
     url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   } catch {
     return { status: 400, body: { error: 'URL 无法解析' } };
+  }
+
+  /* 健康检查。**免鉴权、只回仓库类型，不泄露任何业务数据。**
+   *
+   * 存在的理由：Railway 面板上「变量到底生效没有」要靠猜 —— 保存后
+   * 是自动重新部署，还是要手动点 Deploy，各版本界面不一样。有一个
+   * 能从外面直接读的信号，就不用去猜界面。
+   *
+   * repo.kind === 'postgres' 才算真的接上数据库；'memory' 说明
+   * DATABASE_URL 没注入，进程一重启数据就没。
+   */
+  if (url.pathname === '/healthz') {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        store: repo.kind,                       // 'postgres' | 'memory'
+        persistent: repo.kind === 'postgres',   // 重启后数据还在吗
+        uptimeSec: Math.round(process.uptime()),
+        startedAt: STARTED_AT_ISO,
+      },
+    };
   }
 
   // 路径归一到端点名，规则与固件 proto_route_of 一致（剥 /device 前缀与尾斜杠）
