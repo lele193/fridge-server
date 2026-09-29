@@ -71,7 +71,16 @@ function rasterize(commands, size, baseline, boxH) {
   };
   for (const c of commands) {
     switch (c.type) {
-      case 'M': push(cx, cy, c.x, c.y); cx = sx = c.x; cy = sy = c.y; break;
+      /* **M 只移动笔尖，不画线。**
+       *
+       * 早先这里写的是 push(cx, cy, c.x, c.y) —— 每个新轮廓都被上一个轮廓
+       * 的起点连了一条假边。汉字一笔有五六个轮廓（口=2，冰=4），于是每
+       * 条假边都会在某几条扫描线上多切出两个交点，奇偶配对整体错位一格：
+       * 竖边被填成斜边、字腔跑到错的位置、笔画断成白点。屏幕上的
+       * 「冰字上有白点」「样在库认不清」就是这么来的。
+       *
+       * 轮廓的收口交给 Z，真正的闭合边在那里 push。 */
+      case 'M': cx = sx = c.x; cy = sy = c.y; break;
       case 'L': push(cx, cy, c.x, c.y); cx = c.x; cy = c.y; break;
       case 'C': {
         // 贝塞尔按足够多的折线段近似：墨水屏的分辨率下 24 段绰绰有余，
