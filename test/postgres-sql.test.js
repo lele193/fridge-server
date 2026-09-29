@@ -282,3 +282,87 @@ test('connectionString：一个都没给就返回 null（调用方据此降级�
     process.env = saved;
   }
 });
+
+/* ── 回归：getDevice / getHousehold 也要转 camelCase ──
+ *
+ * 早先只给 getItem / listActiveItems / listShopping 加了行映射，
+ * 漏了 getDevice 和 getHousehold。内存实现存的是 camelCase 键，
+ * 所以测试全绿；一接上真 Postgres，行是 snake_case，
+ * `device.householdId` 变成 undefined —— bind 返回 ok，
+ * 紧接着 sync 就 409「设备尚未绑定到家庭」。
+ *
+ * 这条测试用假 pg 吐一行 snake_case 的 devices 记录，
+ * 守住「repo 吐出来的必须是 camelCase」这条契约。 */
+test('回归：getDevice / getHousehold 的返回值是 camelCase', async () => {
+  const pg = fakePg();
+  const repo = postgresRepo(pg.pg);
+  await repo.init();
+
+  /* 换成会返回数据的假 pg：SELECT * FROM devices 吐一行真实的表结构 */
+  pg.pool.query = (text) => {
+    const sql = typeof text === 'string' ? text : text.text;
+    pg.statements.push(sql);
+    if (/^\s*SELECT\s+\*\s+FROM\s+devices\b/i.test(sql)) {
+      return Promise.resolve({
+        rows: [{
+          device_id: 'dev1', secret: 's', household_id: 'hh1',
+          fw_version: '1.0.0', battery: 90, power: 'usb',
+          last_seen_at: 111, created_at: 222,
+        }],
+        rowCount: 1,
+      });
+    }
+    if (/^\s*SELECT\s+\*\s+FROM\s+households\b/i.test(sql)) {
+      return Promise.resolve({
+        rows: [{ id: 1, household_id: 'hh1', name: '我家', created_at: 222 }],
+        rowCount: 1,
+      });
+    }
+    return Promise.resolve({ rows: [], rowCount: 0 });
+  };
+
+  const d = await repo.getDevice('dev1');
+  assert.ok(d, '应该查到设备');
+  assert.strictEqual(d.householdId, 'hh1',
+    'householdId 必须是 camelCase —— snake_case 的 household_id 会被读成 undefined，sync 直接 409');
+  assert.strictEqual(d.deviceId, 'dev1');
+  assert.strictEqual(d.fwVersion, '1.0.0');
+  assert.strictEqual(d.lastSeenAt, 111);
+
+  const h = await repo.getHousehold('hh1');
+  assert.ok(h, '应该查到家庭');
+  assert.strictEqual(h.householdId, 'hh1');
+  assert.strictEqual(h.name, '我家');
+});
+
+test('回归：两个 repo 吐出来的设备对象形状一致（不然只有接库时才炸）', async () => {
+  const { memoryRepo } = require('../lib/repo');
+  const mem = memoryRepo();
+  await mem.upsertDevice('dev1', {
+    secret: 's', householdId: 'hh1', fwVersion: '1.0.0', lastSeenAt: 111,
+  });
+
+  const pg = fakePg();
+  const pgr = postgresRepo(pg.pg);
+  await pgr.init();
+  pg.pool.query = (text) => {
+    const sql = typeof text === 'string' ? text : text.text;
+    if (/^\s*SELECT\s+\*\s+FROM\s+devices\b/i.test(sql)) {
+      return Promise.resolve({
+        rows: [{
+          device_id: 'dev1', secret: 's', household_id: 'hh1',
+          fw_version: '1.0.0', last_seen_at: 111, created_at: 222,
+        }],
+        rowCount: 1,
+      });
+    }
+    return Promise.resolve({ rows: [], rowCount: 0 });
+  };
+
+  const a = await mem.getDevice('dev1');
+  const b = await pgr.getDevice('dev1');
+  /* 内存那条会多一个 battery/power 的 undefined，删掉再比键集合 */
+  const keys = (o) => Object.keys(o).filter((k) => o[k] !== undefined).sort();
+  assert.deepStrictEqual(keys(b), keys(a),
+    '内存实现和 Postgres 实现吐出来的键必须一样，否则只有接库时才发现');
+});
