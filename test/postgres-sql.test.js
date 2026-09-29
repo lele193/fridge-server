@@ -24,7 +24,7 @@
 const test = require('node:test');
 const assert = require('assert');
 
-const { postgresRepo } = require('../lib/repo');
+const { postgresRepo, connectionString } = require('../lib/repo');
 
 // ────────────────────────── 假 pg ──────────────────────────
 
@@ -231,4 +231,54 @@ test('回归：列名白名单能真的抓到 camelCase（证明上面几条不�
   assert.strictEqual(pg.violations.length, 1);
   assert.strictEqual(pg.violations[0].column, 'lastSeenAt');
   assert.match(pg.violations[0].hint, /camelCase/);
+});
+
+/* ── 连接串兜底 ──
+ * Railway 各版本注入的变量不一样：有的给 DATABASE_URL，有的只给
+ * PGHOST / PGUSER / PGPASSWORD / PGDATABASE / PGPPORT。只认 DATABASE_URL
+ * 的话，后者那条路整个走不通 —— 这正是面板上引用一直解析不出来时
+ * 最该有的退路。 */
+test('connectionString：有 DATABASE_URL 就用它', () => {
+  const saved = { ...process.env };
+  process.env.DATABASE_URL = 'postgresql://u:p@h:5432/db';
+  process.env.PGHOST = 'other';
+  try {
+    assert.strictEqual(connectionString(), 'postgresql://u:p@h:5432/db');
+  } finally {
+    process.env = saved;
+  }
+});
+
+test('connectionString：没有 DATABASE_URL 就用 PG* 拼一个', () => {
+  const saved = { ...process.env };
+  delete process.env.DATABASE_URL;
+  Object.assign(process.env, {
+    PGHOST: 'postgres.railway.internal',
+    PGPORT: '5432',
+    PGUSER: 'postgres',
+    PGPASSWORD: 'p@ss:w/rd',
+    PGDATABASE: 'railway',
+  });
+  try {
+    // 密码里的 @ : / 必须转义，否则 pg 会把后半段当成 host，
+    // 报的是 "password authentication failed" —— 看着像密码错，其实在别处
+    assert.strictEqual(
+      connectionString(),
+      'postgresql://postgres:p%40ss%3Aw%2Frd@postgres.railway.internal:5432/railway',
+    );
+  } finally {
+    process.env = saved;
+  }
+});
+
+test('connectionString：一个都没给就返回 null（调用方据此降级到内存）', () => {
+  const saved = { ...process.env };
+  for (const k of Object.keys(process.env)) {
+    if (/^(DATABASE|PG)/i.test(k)) delete process.env[k];
+  }
+  try {
+    assert.strictEqual(connectionString(), null);
+  } finally {
+    process.env = saved;
+  }
 });
