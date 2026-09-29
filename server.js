@@ -126,6 +126,16 @@ async function handle(req, repo) {
         ok: true,
         store: repo.kind,                       // 'postgres' | 'memory'
         persistent: repo.kind === 'postgres',   // 重启后数据还在吗
+        /* 诊断：只报「有哪些环境变量」，不报值。
+         * store=memory 而 hasDatabaseUrl=false → 变量加到别的服务上了
+         *                            （最常见：加在了 Postgres 自己那张卡）
+         * store=memory 而 hasDatabaseUrl=true  → 值是空的或引用没解析出来 */
+        hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
+        pgVars: Object.keys(process.env)
+          .filter((k) => /^PG|POSTGRES|DATABASE/i.test(k))
+          .sort(),
+        service: process.env.RAILWAY_SERVICE_NAME || '',
+        project: process.env.RAILWAY_PROJECT_NAME || '',
         uptimeSec: Math.round(process.uptime()),
         startedAt: STARTED_AT_ISO,
       },
