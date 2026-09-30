@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>冰箱管家</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #f5f5f5;
+  color: #333;
+  padding-bottom: 80px;
+}
+.header {
+  background: #2c3e50;
+  color: white;
+  padding: 16px;
+  text-align: center;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.header h1 { font-size: 20px; font-weight: 600; }
+.header .stats { font-size: 13px; opacity: 0.8; margin-top: 4px; }
+
+.tabs {
+  display: flex;
+  background: white;
+  border-bottom: 1px solid #e0e0e0;
+  position: sticky;
+  top: 56px;
+  z-index: 99;
+}
+.tab {
+  flex: 1;
+  padding: 12px;
+  text-align: center;
+  font-size: 14px;
+  color: #666;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.tab.active {
+  color: #2c3e50;
+  border-bottom-color: #2c3e50;
+  font-weight: 600;
+}
+
+.page { display: none; padding: 16px; }
+.page.active { display: block; }
+
+.card {
+  background: white;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.card-title { font-size: 16px; font-weight: 600; }
+
+.item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+.item:last-child { border-bottom: none; }
+.item-info { flex: 1; }
+.item-name { font-size: 15px; font-weight: 500; }
+.item-meta { font-size: 12px; color: #888; margin-top: 2px; }
+.item-expired { color: #e74c3c; }
+.item-soon { color: #f39c12; }
+.item-normal { color: #27ae60; }
+
+.btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-danger { background: #e74c3c; color: white; }
+.btn-primary { background: #3498db; color: white; }
+.btn-success { background: #27ae60; color: white; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+.add-form {
+  background: white;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
+.form-group input, .form-group select {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 15px;
+}
+.form-group input:focus, .form-group select:focus {
+  outline: none;
+  border-color: #3498db;
+}
+.btn-full { width: 100%; padding: 12px; font-size: 16px; }
+
+.empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: #999;
+}
+.empty-icon { font-size: 48px; margin-bottom: 12px; }
+
+.fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #3498db;
+  color: white;
+  border: none;
+  font-size: 28px;
+  box-shadow: 0 4px 12px rgba(52,152,219,0.4);
+  cursor: pointer;
+  z-index: 100;
+}
+
+.modal {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 200;
+  align-items: flex-end;
+}
+.modal.active { display: flex; }
+.modal-content {
+  background: white;
+  width: 100%;
+  border-radius: 16px 16px 0 0;
+  padding: 20px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.modal-title { font-size: 18px; font-weight: 600; }
+.modal-close { font-size: 24px; color: #999; cursor: pointer; }
+
+.token-input {
+  background: white;
+  border-radius: 12px;
+  padding: 16px;
+  margin: 16px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>冰箱管家</h1>
+  <div class="stats" id="stats">加载中...</div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-page="fridge">冰箱</div>
+  <div class="tab" data-page="shopping">购物清单</div>
+</div>
+
+<!-- 冰箱页面 -->
+<div class="page active" id="page-fridge">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">添加食材</span>
+    </div>
+    <div class="form-group">
+      <label>食材名称</label>
+      <input type="text" id="addName" placeholder="例如：鸡蛋">
+    </div>
+    <div class="form-group">
+      <label>数量</label>
+      <input type="number" id="addQty" value="1" min="1">
+    </div>
+    <div class="form-group">
+      <label>保质期（天，可选）</label>
+      <input type="number" id="addExpire" placeholder="不填则不设保质期" min="0">
+    </div>
+    <button class="btn btn-primary btn-full" onclick="addItem()">添加</button>
+  </div>
+
+  <div id="fridgeList"></div>
+</div>
+
+<!-- 购物清单页面 -->
+<div class="page" id="page-shopping">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">添加购物项</span>
+    </div>
+    <div class="form-group">
+      <label>名称（多个用顿号分隔）</label>
+      <input type="text" id="shopNames" placeholder="例如：青菜、鸡蛋、豆腐">
+    </div>
+    <button class="btn btn-primary btn-full" onclick="addShop()">添加</button>
+  </div>
+
+  <div id="shoppingList"></div>
+</div>
+
+<!-- 底部弹出框 -->
+<div class="modal" id="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <span class="modal-title" id="modalTitle">提示</span>
+      <span class="modal-close" onclick="closeModal()">&times;</span>
+    </div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+let token = localStorage.getItem('fridge_token') || '';
+
+// 检查 token
+if (!token) {
+  showTokenInput();
+}
+
+function showTokenInput() {
+  const div = document.createElement('div');
+  div.className = 'token-input';
+  div.innerHTML = `
+    <div class="form-group">
+      <label>访问密码</label>
+      <input type="password" id="tokenInput" placeholder="请输入访问密码">
+    </div>
+    <button class="btn btn-primary btn-full" onclick="saveToken()">进入</button>
+  `;
+  document.body.prepend(div);
+}
+
+function saveToken() {
+  const t = document.getElementById('tokenInput').value.trim();
+  if (t) {
+    token = t;
+    localStorage.setItem('fridge_token', token);
+    location.reload();
+  }
+}
+
+// Tab 切换
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('page-' + tab.dataset.page).classList.add('active');
+  });
+});
+
+// API 调用
+async function api(path, body) {
+  const res = await fetch(API + path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Token': token },
+    body: JSON.stringify(body)
+  });
+  return res.json();
+}
+
+// 加载冰箱清单
+async function loadFridge() {
+  const data = await api('/web/fridge', {});
+  const list = document.getElementById('fridgeList');
+  
+  if (data.error) {
+    list.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>${data.error}</div>`;
+    return;
+  }
+
+  document.getElementById('stats').textContent = `${data.items.length} 样在库`;
+  
+  if (data.items.length === 0) {
+    list.innerHTML = `<div class="empty"><div class="empty-icon">🧊</div>冰箱是空的</div>`;
+    return;
+  }
+
+  list.innerHTML = data.items.map(item => {
+    const days = item.expireAt ? Math.ceil((item.expireAt - Date.now()) / 86400000) : null;
+    let statusClass = 'item-normal';
+    let statusText = '';
+    if (days !== null) {
+      if (days < 0) { statusClass = 'item-expired'; statusText = `已过期 ${Math.abs(days)} 天`; }
+      else if (days <= 3) { statusClass = 'item-soon'; statusText = `还剩 ${days} 天`; }
+      else { statusText = `还剩 ${days} 天`; }
+    } else {
+      statusText = `放了 ${Math.floor((Date.now() - item.createdAt) / 86400000)} 天`;
+    }
+    return `
+      <div class="card">
+        <div class="item">
+          <div class="item-info">
+            <div class="item-name">${item.name}</div>
+            <div class="item-meta ${statusClass}">${item.qty} ${item.unit} · ${statusText}</div>
+          </div>
+          <button class="btn btn-sm btn-success" onclick="eatItem('${item.id}')">吃完</button>
+          <button class="btn btn-sm btn-danger" onclick="delItem('${item.id}')">删除</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// 加载购物清单
+async function loadShopping() {
+  const data = await api('/web/shopping', {});
+  const list = document.getElementById('shoppingList');
+  
+  if (data.error) {
+    list.innerHTML = `<div class="empty"><div class="empty-icon">⚠️</div>${data.error}</div>`;
+    return;
+  }
+
+  if (data.items.length === 0) {
+    list.innerHTML = `<div class="empty"><div class="empty-icon">📝</div>购物清单是空的</div>`;
+    return;
+  }
+
+  list.innerHTML = data.items.map(item => `
+    <div class="card">
+      <div class="item">
+        <div class="item-info">
+          <div class="item-name">${item.name}</div>
+          <div class="item-meta">${item.status === 'pending' ? '待购买' : '已购买'}</div>
+        </div>
+        ${item.status === 'pending' ? `<button class="btn btn-sm btn-success" onclick="buyItem('${item.id}')">买到</button>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+// 添加食材
+async function addItem() {
+  const name = document.getElementById('addName').value.trim();
+  const qty = parseInt(document.getElementById('addQty').value) || 1;
+  const expireDays = parseInt(document.getElementById('addExpire').value) || 0;
+  
+  if (!name) { alert('请输入食材名称'); return; }
+  
+  const data = await api('/web/add', { name, qty, expireDays });
+  if (data.error) { alert(data.error); return; }
+  
+  document.getElementById('addName').value = '';
+  document.getElementById('addExpire').value = '';
+  loadFridge();
+}
+
+// 删除食材
+async function delItem(id) {
+  if (!confirm('确定删除？')) return;
+  await api('/web/delete', { id });
+  loadFridge();
+}
+
+// 标记吃完
+async function eatItem(id) {
+  await api('/web/eat', { id });
+  loadFridge();
+}
+
+// 添加购物
+async function addShop() {
+  const names = document.getElementById('shopNames').value.trim();
+  if (!names) { alert('请输入名称'); return; }
+  
+  const data = await api('/web/shop', { names });
+  if (data.error) { alert(data.error); return; }
+  
+  document.getElementById('shopNames').value = '';
+  loadShopping();
+}
+
+// 买到
+async function buyItem(id) {
+  await api('/web/buy', { id });
+  loadShopping();
+}
+
+// 初始化
+loadFridge();
+</script>
+</body>
+</html>

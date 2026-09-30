@@ -1,0 +1,24 @@
+{
+  "name": "fridge-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "build:font": "node tools/build-font.js",
+    "preview:screen": "node tools/screen-preview.js",
+    "check:charset": "node tools/check-charset.js"
+  },
+  "license": "ISC",
+  "description": "冰箱管家服务端（Node HTTP，适配 Railway）",
+  "dependencies": {
+    "pg": "^8.23.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "opentype.js": "^2.0.0"
+  }
+}
