@@ -23,13 +23,21 @@ function firmwareDecode(bytes) {
   return { fb: out, written: w };
 }
 
+/* 画满 8 行 —— 预览的职责是暴露版式问题，而版式问题只在**行数拉满**时
+ * 才暴露（最后一行会不会撞点线、第 8 行放不放得下）。
+ *
+ * 特意塞一个「已过期」的行：反白块是整行最高的元素（20px），
+ * 短行根本测不出它和下一行的间距够不够。 */
 const screen = renderHome([
   { _id: '1', name: '鸡蛋', qty: 6, unit: '个', expireAt: now + 1 * DAY },
   { _id: '2', name: '牛奶', qty: 1, unit: '盒', expireAt: now + 2 * DAY },
   { _id: '3', name: '过期的酸奶', qty: 2, unit: '杯', expireAt: now - 1 * DAY },
   { _id: '4', name: '上海青', qty: 1, unit: '把', expireAt: now + 5 * DAY },
   { _id: '5', name: '三文鱼', qty: 1, unit: '块', expireAt: now + 9 * DAY },
-], { now, household: '我家', total: 12, expiring: 3 });
+  { _id: '6', name: '长毛的豆腐', qty: 1, unit: '盒', expireAt: now - 3 * DAY },
+  { _id: '7', name: '燕麦片', qty: 2, unit: '袋', expireAt: now + 30 * DAY },
+  { _id: '8', name: '坚果', qty: 1, unit: '罐', expireAt: 0 },
+], { now, household: '我家', total: 34, expiring: 3 });
 
 // 走一遍固件的解码路径，确认下发的字节真能被 rle_decode 还原
 const rle = Buffer.from(screen.data, 'base64');
