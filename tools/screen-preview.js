@@ -2,6 +2,7 @@
  * screen-preview.js —— 把整屏渲染结果打成 ASCII，确认排版与自绘区。
  * 用法：node tools/screen-preview.js
  */
+const fs = require('fs');
 const { renderHome } = require('../lib/screen');
 const { FRAME, RESERVED, rleDecode } = require('../lib/render');
 
@@ -62,4 +63,67 @@ for (let y = RESERVED.y; y < RESERVED.y + RESERVED.h; y++) {
 }
 console.log(`固件自绘区 {${RESERVED.x},${RESERVED.y},${RESERVED.w},${RESERVED.h}} 黑点 = ${reservedBlack} ` +
   (reservedBlack === 0 ? '✓ 全白' : '✗ 被云端画了，会被固件擦掉'));
+
+/**
+ * 顺手写一张 PNG。
+ *
+ * ASCII 预览看不出「挤不挤」「对不对齐」—— 那些都是像素级的事，
+ * 盯着 300 行等宽字符猜很累。1bpp 位图写成 8 位灰度 PNG（黑=0 白=255），
+ * 用 zlib 压（Node 自带），零依赖。
+ *
+ * 另外把固件自绘区叠一层浅灰，方便确认「云端没画进去、固件那块空着」。
+ */
+function writePng(path) {
+  const zlib = require('zlib');
+  const { W, H } = FRAME;
+  const raw = Buffer.alloc(H * (W + 1));
+  for (let y = 0; y < H; y++) {
+    const o = y * (W + 1);
+    raw[o] = 0; // filter: None
+    for (let x = 0; x < W; x++) {
+      const bit = (fb[y * FRAME.STRIDE + (x >> 3)] >> (7 - (x & 7))) & 1;
+      let v = bit ? 0 : 255;
+      // 自绘区叠浅灰（232），一眼看出固件那块留白了
+      if (y >= RESERVED.y && y < RESERVED.y + RESERVED.h &&
+          x >= RESERVED.x && x < RESERVED.x + RESERVED.w) {
+        v = bit ? 0 : 232;
+      }
+      raw[o + 1 + x] = v;
+    }
+  }
+  const crcTable = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[n] = c >>> 0;
+  }
+  const crc = (buf) => {
+    let c = 0xffffffff;
+    for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const c = Buffer.alloc(4);
+    c.writeUInt32BE(crc(body));
+    return Buffer.concat([len, body, c]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(W, 0);
+  ihdr.writeUInt32BE(H, 4);
+  ihdr[8] = 8;  // bit depth
+  ihdr[9] = 0;  // color type: grayscale
+  fs.writeFileSync(path, Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', zlib.deflateSync(raw, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]));
+  console.log(`已写 ${path}（浅灰块 = 固件自绘区）`);
+}
+
+if (process.env.PREVIEW_PNG) writePng(process.env.PREVIEW_PNG);
+
 process.exit(reservedBlack === 0 ? 0 : 1);
