@@ -1,11 +1,17 @@
 /**
  * sort-order.test.js —— 列表展示顺序的规则测试。
  *
- * 规则：**过期的排最前（过期越久越靠上），其次是没过期但放得最久的。**
+ * 规则（三刀）：
+ *   1. 过期的排最前
+ *   2. 组内按到期时间升序（过期组 = 过期越久越靠前；未过期组 = 越近越靠前）
+ *   3. 到期时间相同 → 后放的排后面；再相同 → 按 id
  *
- * 之前是「按到期时间升序」排的，那意味着两样东西谁先谁后取决于**还能放多久**。
- * 但该先吃的是**已经放了最久**的那个：保质期 3 天的酸奶如果是三天前才买的，
- * 就不该排在两个月前买的苹果前面 —— 后者离变质更近了。
+ * 第 2 条改过一次：中间那版是「未过期按入库时间排」（先进先出），
+ * 用户明确要求改成按到期时间 —— 该先吃的是快到期的那个，
+ * 保质期 3 天的酸奶三天前才买，不该排在两个月前买的苹果前面。
+ *
+ * 没设保质期的用 9999 年当到期日（NO_EXPIRY），在升序里自然落到最后：
+ * 「不知道什么时候过期」意味着「不着急」，不该占着靠前的位置。
  *
  * 这条排序同时决定两件事，所以必须测：
  *   1. 屏幕上每一行的先后
@@ -20,7 +26,12 @@ const { sortForDisplay, isExpired } = require('../lib/repo');
 const DAY = 86400000;
 const NOW = new Date('2026-09-29T12:00:00Z').getTime();
 
-/** 造一条食材。born 是入库时间（距今多少天前），exp 到期时间（距今多少天，过期为负） */
+const { NO_EXPIRY } = require('../lib/repo');
+
+/** 造一条食材。born 是入库时间（距今多少天前），exp 到期时间（距今多少天，过期为负）。
+ *  exp 传 null = 没说保质期 → 用 NO_EXPIRY（9999 年），**不能写 0**：
+ *  0 在时间戳里是 1970 年，会被 isExpired 的 exp>0 判据放过去当成
+ *  「到期日 = 0 = 最早」，直接排到第一行去。服务端早先就踩过这个。 */
 function item(name, bornDaysAgo, expDays) {
   return {
     id: name,
@@ -28,7 +39,7 @@ function item(name, bornDaysAgo, expDays) {
     qty: 1,
     unit: '份',
     createdAt: NOW - bornDaysAgo * DAY,
-    expireAt: expDays === null ? 0 : NOW + expDays * DAY,
+    expireAt: expDays === null ? NO_EXPIRY : NOW + expDays * DAY,
   };
 }
 
@@ -44,11 +55,12 @@ test('isExpired：没设保质期的不算过期', () => {
 
 test('排序：过期的全部排在没过期的前面', () => {
   const list = sortForDisplay([
-    item('酸奶', 1, 3),      // 没过期，刚买
+    item('酸奶', 1, 3),      // 没过期，剩 3 天
     item('三文鱼', 6, -1),   // 过期
-    item('牛奶', 2, 5),      // 没过期
+    item('牛奶', 2, 5),      // 没过期，剩 5 天
   ], NOW);
-  assert.deepStrictEqual(names(list), ['三文鱼', '牛奶', '酸奶']);
+  // 组内按到期时间升序：酸奶(3) 在 牛奶(5) 前面
+  assert.deepStrictEqual(names(list), ['三文鱼', '酸奶', '牛奶']);
 });
 
 test('排序：都过期时，过期越久（到期日越早）越靠上', () => {
@@ -60,24 +72,72 @@ test('排序：都过期时，过期越久（到期日越早）越靠上', () =>
   assert.deepStrictEqual(names(list), ['一周前过的', '三天前过的', '昨天过的']);
 });
 
-test('排序：都没过期时，入库越早越靠上（不按到期时间）', () => {
-  /* 这条是整个改动的核心：苹果两个月前买的（还剩 5 天）、
-   * 酸奶三天前买的（还剩 3 天）。按到期时间排是酸奶在前，
-   * 但苹果才是更该先吃的那袋。 */
+test('排序：都没过期时按到期时间升序（近的在前），不按入库时间', () => {
+  /* 苹果两个月前买的（还剩 5 天）、酸奶三天前买的（还剩 3 天）。
+   * 按入库时间是苹果在前；按到期时间是酸奶在前 —— 用户要的是后者，
+   * 因为酸奶才是快到期的那个。 */
   const list = sortForDisplay([
     item('酸奶', 3, 3),
     item('苹果', 60, 5),
     item('牛奶', 10, 7),
   ], NOW);
-  assert.deepStrictEqual(names(list), ['苹果', '牛奶', '酸奶']);
+  assert.deepStrictEqual(names(list), ['酸奶', '苹果', '牛奶']);
 });
 
-test('排序：没设保质期的排在同组最后，不占第一行', () => {
+test('排序：没设保质期的排最后（9999 年 = 不着急）', () => {
+  const { NO_EXPIRY } = require('../lib/repo');
   const list = sortForDisplay([
-    item('不明物体', 0, null),
+    item('排骨', 1, null),                 // 没说过保质期 → 9999 年
+    item('苹果', 3, 60),
+    item('鸡蛋', 2, 3),
+  ], NOW);
+  // 过期的最前，其余按到期时间升序，排骨因为 9999 年落到最后
+  assert.deepStrictEqual(names(list), ['鸡蛋', '苹果', '排骨']);
+  assert.strictEqual(NO_EXPIRY > Date.UTC(9999, 0, 1), true);
+});
+
+test('排序：到期时间相同则后放的排后面（先买的先吃）', () => {
+  const sameExp = NOW + 3 * DAY;
+  const list = sortForDisplay([
+    item('后加的', 1, 3),
+    item('先加的', 5, 3),   // 到期一样，但早 4 天入库
+  ], NOW);
+  // createdAt 升序 → 先加的在前
+  assert.deepStrictEqual(names(list), ['先加的', '后加的']);
+});
+
+test('排序：完整场景 —— 过期最前，其余按到期时间，排骨最后', () => {
+  const { NO_EXPIRY } = require('../lib/repo');
+  const list = sortForDisplay([
+    { id: 17, name: '苹果', expireAt: NOW + 60 * DAY, createdAt: NOW },
+    { id: 13, name: '排骨', expireAt: NO_EXPIRY, createdAt: NOW },
+    { id: 14, name: '三文鱼', expireAt: NOW - 1 * DAY, createdAt: NOW },
+    { id: 16, name: '牛奶', expireAt: NOW + 30 * DAY, createdAt: NOW },
+    { id: 15, name: '鸡蛋', expireAt: NOW + 3 * DAY, createdAt: NOW },
+  ], NOW);
+  assert.deepStrictEqual(names(list), ['三文鱼', '鸡蛋', '牛奶', '苹果', '排骨']);
+});
+
+test('排序：没设保质期的排在同组最后（不占第一行）', () => {
+  const list = sortForDisplay([
+    item('不明物体', 0, null),   // 9999 年
     item('苹果', 60, 5),
   ], NOW);
   assert.deepStrictEqual(names(list), ['苹果', '不明物体']);
+});
+
+test('排序：expireAt=0 也当 9999 年处理（兜住漏改的路径）', () => {
+  /* 服务端用 NO_EXPIRY 表达「没保质期」。但 expireAt 一旦是 0
+   *（时间戳里的 1970 年），isExpired 的 exp>0 判据会放它过去（不算过期），
+   * 而作为排序键 0 是全场最小值 —— 「没说过保质期」的东西会凭空顶到第一行。
+   * 写这条测试时先验证过：真的会排到第一行。
+   * 现在比较器里也做了归一，所以它必须落到最后。 */
+  const list = sortForDisplay([
+    item('苹果', 3, 60),
+    item('鸡蛋', 2, 3),
+    { id: '零', name: 'expireAt 是 0', qty: 1, createdAt: NOW, expireAt: 0 },
+  ], NOW);
+  assert.deepStrictEqual(names(list), ['鸡蛋', '苹果', 'expireAt 是 0']);
 });
 
 test('排序：不改原数组', () => {
@@ -175,10 +235,10 @@ test('端到端：sync 回的 items 顺序和屏幕行顺序一致', async (t) =
   /* 挨个加，每次隔几毫秒 —— createdAt 是毫秒级的，
    * 同时加入的话三样 createdAt 相同，「入库最早」这条就没法验了。
    *
-   * 顺序是刻意排的：苹果**先**加入（所以入库最早）但到期**最晚**（剩 5 天），
+   * 顺序是刻意排的：苹果**先**加入（入库最早）但到期**最晚**（剩 5 天），
    * 酸奶**后**加入但到期**最早**（剩 3 天）。
-   * 按「到期时间」排的话酸奶会在苹果前面 —— 那样就证明没改成
-   * 「没过期按入库时间」这条规则。 */
+   * 期望结果按到期时间排 —— 酸奶在苹果前面。
+   * 早先这里是「按入库时间」的版本，期望反过来；现在规则是到期时间。 */
   await send({ opId: 'a1', op: 'add', name: '苹果', qty: 1, expireAt: t0 + 5 * DAY });
   await new Promise((r) => setTimeout(r, 5));
   await send({ opId: 'a2', op: 'add', name: '三文鱼', qty: 1, expireAt: t0 - 1 * DAY });
@@ -192,8 +252,8 @@ test('端到端：sync 回的 items 顺序和屏幕行顺序一致', async (t) =
   assert.strictEqual(s.status, 200);
   assert.deepStrictEqual(
     names(s.body.items),
-    ['三文鱼', '苹果', '酸奶'],
-    '过期的三文鱼在最前；苹果虽然剩 5 天但入库最早，排酸奶前面',
+    ['三文鱼', '酸奶', '苹果'],
+    '过期的三文鱼在最前；未过期按到期时间升序 —— 酸奶剩 3 天排苹果(5天)前面',
   );
 
   /* 屏幕位图也得是同一个顺序。位图是 RLE 压过的，这里解开看第一行是谁。 */
