@@ -8,6 +8,16 @@
  * 改 renderHome 的文案后跑一次：
  *     node tools/check-charset.js
  * 输出为空（只打印 OK）才算齐。
+ *
+ * **但它只看版式里写死的文案，看不到数据库里的食材名。** 缺字在屏幕上
+ * 是个空心方框，不报错不抛异常 —— 真实案例：加了一批带生僻字的测试数据
+ * （过期货奶 / 长毛豆腐 / 燕麦片 / 坚果…），屏上 8 个字全是方框，
+ * 而这个工具一路报 OK，因为它根本不知道有那些名字。
+ *
+ * 所以支持从命令行传入额外要查的文本：
+ *     node tools/check-charset.js 过期货奶 长毛豆腐 燕麦片 坚果
+ *     node tools/check-charset.js --file /tmp/names.txt
+ * 加完新数据后**必须**跑一次带数据的那条。
  */
 
 const atlas = require('../lib/font-atlas.json');
@@ -39,6 +49,26 @@ function allTexts() {
   return out;
 }
 
+/** 命令行给的额外文本：直接传的参数，或 --file 指定的文件（每行一段） */
+function extraTexts() {
+  const argv = process.argv.slice(2);
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--file') {
+      const f = argv[i + 1];
+      if (!f) {
+        console.error('--file 后面要跟文件路径');
+        process.exit(2);
+      }
+      out.push(...require('fs').readFileSync(f, 'utf8').split('\n'));
+      i++;
+    } else {
+      out.push(argv[i]);
+    }
+  }
+  return out.filter((s) => s.length);
+}
+
 function main() {
   const font = atlas['20'] || atlas[Object.keys(atlas)[0]];
   if (!font) {
@@ -46,8 +76,13 @@ function main() {
     process.exit(1);
   }
 
+  const texts = allTexts().concat(extraTexts());
+  if (extraTexts().length) {
+    console.log(`额外检查命令行给的 ${extraTexts().length} 段文本`);
+  }
+
   const missing = new Map();
-  for (const t of allTexts()) {
+  for (const t of texts) {
     for (const ch of t) {
       if (ch === ' ' || ch === '\n') continue;
       if (!font.glyphs[ch]) {
@@ -58,7 +93,7 @@ function main() {
   }
 
   if (missing.size === 0) {
-    console.log('OK —— 当前版式用到的字全部在字模里');
+    console.log('OK —— 所有待画文本的字都在字模里');
     return;
   }
 
