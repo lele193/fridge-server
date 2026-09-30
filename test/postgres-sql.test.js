@@ -366,3 +366,121 @@ test('回归：两个 repo 吐出来的设备对象形状一致（不然只有�
   assert.deepStrictEqual(keys(b), keys(a),
     '内存实现和 Postgres 实现吐出来的键必须一样，否则只有接库时才发现');
 });
+
+/* ── 回归：BIGINT 必须转成 number ──
+ *
+ * node-postgres 对 int8（Postgres 的 BIGINT）默认返回**字符串**，这是精度
+ * 保护：int8 最大 9.2e18，JSON number 只能精确到 2^53。
+ *
+ * 之前所有测试都是绿的，因为假 pg 返回的是 **number**。真库返回字符串，
+ * 于是 expireAt / createdAt 一路传到 sync 的 JSON 里变成 "253402300799000"。
+ *
+ * 后果在固件那边：cJSON_IsNumber() 对 JSON 字符串返回 false，
+ * `expire_at = cJSON_IsNumber(v) ? ... : 0` 于是把两个时间都读成 0 ——
+ * 语音里所有食材都说「放了 0 天」，DescribeExpiring 永远列不出东西。
+ *
+ * 下面这些数字都故意写成字符串，还带着真实 BIGINT 那种可能的精度。 */
+const AS_BIGINT_STRING = true;
+
+test('回归：BIGINT 列返回字符串时，必须转成 number', async () => {
+  const pg = fakePg();
+  const repo = postgresRepo(pg.pg);
+  await repo.init();
+
+  pg.pool.query = (text) => {
+    const sql = typeof text === 'string' ? text : text.text;
+    if (/^\s*SELECT\s+\*\s+FROM\s+items\b/i.test(sql)) {
+      return Promise.resolve({
+        rows: [{
+          id: 1, household_id: 'hh1', name: '排骨', qty: 1, unit: '斤',
+          // 真库就是这样：int8 回来是字符串
+          expire_at: '253402300799000', created_at: '1790733525222', status: 'fresh',
+        }],
+        rowCount: 1,
+      });
+    }
+    return Promise.resolve({ rows: [], rowCount: 0 });
+  };
+
+  const items = await repo.listActiveItems('hh1', 200);
+  assert.strictEqual(items.length, 1);
+  assert.strictEqual(typeof items[0].expireAt, 'number',
+    `expireAt 必须是 number，实际是 ${typeof items[0].expireAt}（${items[0].expireAt}）`);
+  assert.strictEqual(typeof items[0].createdAt, 'number',
+    `createdAt 必须是 number，实际是 ${typeof items[0].createdAt}`);
+  assert.strictEqual(items[0].expireAt, 253402300799000);
+  assert.strictEqual(items[0].createdAt, 1790733525222);
+
+  /* 转成 number 之后日期算得出来 —— 字符串直接给 new Date 是 Invalid Date */
+  assert.ok(Number.isFinite(new Date(items[0].expireAt).getTime()),
+    '转成 number 之后必须能构造合法 Date');
+});
+
+test('回归：sync 回给固件的 expireAt/createdAt 是 JSON number 而不是字符串', async (t) => {
+  const { createServer } = require('../server');
+  const http = require('http');
+  const crypto = require('crypto');
+
+  /* 用真 Postgres 路径，但让假 pg 按真驱动那样返回字符串 */
+  const pg = fakePg();
+  const repo = postgresRepo(pg.pg);
+  await repo.init();
+
+  pg.pool.query = (text) => {
+    const sql = typeof text === 'string' ? text : text.text;
+    if (/FROM\s+devices\b/i.test(sql) && /SELECT/i.test(sql)) {
+      return Promise.resolve({ rows: [{ device_id: 'dev1', secret: 's', household_id: 'hh1', created_at: '1000' }], rowCount: 1 });
+    }
+    if (/FROM\s+households\b/i.test(sql) && /SELECT/i.test(sql)) {
+      return Promise.resolve({ rows: [{ household_id: 'hh1', name: '我家', created_at: '1000' }], rowCount: 1 });
+    }
+    if (/FROM\s+items\b/i.test(sql) && /SELECT/i.test(sql)) {
+      return Promise.resolve({
+        rows: [{
+          id: 1, household_id: 'hh1', name: '排骨', qty: 1, unit: '斤',
+          expire_at: '253402300799000', created_at: '1790733525222', status: 'fresh',
+        }],
+        rowCount: 1,
+      });
+    }
+    return Promise.resolve({ rows: [], rowCount: 0 });
+  };
+
+  const server = createServer(repo);
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  t.after(() => server.close());
+
+  const req = (method, path, { body, auth } = {}) => new Promise((resolve, reject) => {
+    const payload = body === undefined ? null : Buffer.from(body, 'utf8');
+    const headers = {};
+    if (payload) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = payload.length; }
+    if (auth) headers.Authorization = auth;
+    const r = http.request({ host: '127.0.0.1', port, method, path, headers }, (res) => {
+      const cs = [];
+      res.on('data', (c) => cs.push(c));
+      res.on('end', () => {
+        const t = Buffer.concat(cs).toString('utf8');
+        let j = null;
+        try { j = JSON.parse(t); } catch { /* 304 */ }
+        resolve({ status: res.statusCode, text: t, body: j });
+      });
+    });
+    r.on('error', reject);
+    if (payload) r.write(payload);
+    r.end();
+  });
+
+  const ts = String(Date.now());
+  const sig = crypto.createHmac('sha256', 's').update(ts + 'GET/sync' + '').digest('hex');
+  const s = await req('GET', '/device/sync?rev=0&hash=', { auth: `HMAC dev1:${ts}:${sig}` });
+  assert.strictEqual(s.status, 200, s.text);
+
+  /* 直接在原始 JSON 文本里找这两个字段的引号情况 ——
+   * 字符串会写成 "expireAt":"253402300799000" */
+  assert.ok(/"expireAt":\s*\d/.test(s.text),
+    'expireAt 必须是 JSON number（固件用 cJSON_IsNumber 判断，字符串会被读成 0）');
+  assert.ok(/"createdAt":\s*\d/.test(s.text),
+    'createdAt 必须是 JSON number');
+  assert.strictEqual(typeof s.body.items[0].expireAt, 'number');
+});
