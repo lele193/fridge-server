@@ -115,3 +115,36 @@ test('今天到期（days = 0）算「还剩 0 天」而不是「已过期」', 
   const expired = hashOf([mk({ expireAt: NOW - 3600000 })]); // 过了 1 小时
   assert.notStrictEqual(today, expired, '今天到期和已经过期是两回事');
 });
+
+test('回归：默认到期日是 9999 年，不是 0', () => {
+  const { NO_EXPIRY } = require('../lib/repo');
+  const { renderHome } = require('../lib/screen');
+
+  /* 0 在时间戳里是 1970-01-01。漏掉「为 0 当没有」的判断就会算出
+   * days = (0 - now)/DAY = -20726 → 屏幕显示「已过期 20726 天」，
+   * 而且这个数每天还在涨。踩过，所以钉死。 */
+  assert.ok(NO_EXPIRY > Date.UTC(9999, 0, 1), '默认到期日必须在 9999 年之后');
+
+  /* 屏上表现必须一致：两条都显示「放了 N 天 · 6 份」。
+   * 0 走 daysLeft 的 null 分支，9999 年走大正数分支，
+   * 两条分支殊途同归 —— 换句话说换掉默认值不影响用户看到的东西，
+   * 只是把「万一漏判就是 -20726 天」这个雷拆了。 */
+  assert.strictEqual(
+    hashOf([mk({ expireAt: 0 })]),
+    hashOf([mk({ expireAt: NO_EXPIRY })]),
+    '0 和 9999 年在屏上必须长得一样（都是「放了 N 天」那一档）',
+  );
+});
+
+test('9999 年不会被判成临期，且排在过期项之后', () => {
+  const { NO_EXPIRY, isExpired, sortForDisplay } = require('../lib/repo');
+  const noDate = { id: 1, name: '排骨', qty: 1, expireAt: NO_EXPIRY, createdAt: NOW - 2 * DAY };
+  const old = { id: 2, name: '三文鱼', qty: 1, expireAt: NOW - 1 * DAY, createdAt: NOW - 9 * DAY };
+
+  assert.strictEqual(isExpired(noDate, NOW), false, '9999 年不算过期');
+  assert.deepStrictEqual(
+    sortForDisplay([noDate, old], NOW).map((x) => x.name),
+    ['三文鱼', '排骨'],
+    '过期的排前面，9999 年的排后面',
+  );
+});

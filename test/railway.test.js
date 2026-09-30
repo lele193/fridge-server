@@ -324,9 +324,16 @@ test('add：没说保质期就是「没有」，不编一个到期日出来', as
 
   assert.strictEqual(by('牛奶').expireAt, said, '用户说了三天就该原样存三天');
 
+  const { NO_EXPIRY } = require('../lib/repo');
   for (const n of ['排骨', '青菜', '豆腐']) {
-    assert.strictEqual(by(n).expireAt, 0,
-      `${n} 没说保质期，expireAt 必须是 0（没有），不能编一个日期出来`);
+    assert.strictEqual(by(n).expireAt, NO_EXPIRY,
+      `${n} 没说保质期，expireAt 必须是「不会过期」，不能编一个日期出来`);
+    /* 必须是公元 9999 年，不能是 0。0 在时间戳里是 1970-01-01，
+     * 任何一处漏掉「为 0 当没有」的判断都会算出 days = -20726，
+     * 屏幕上显示「已过期 20726 天」，而且这个数每天还在涨。
+     * 这个坑真踩过，所以钉死。 */
+    assert.ok(by(n).expireAt > Date.UTC(9999, 0, 1),
+      '默认到期日必须是 9999 年，不能是 0（0 = 1970 年，会被算成过期两万年）');
   }
 
   /* 端到端确认：没说保质期的，屏幕上是「放了 N 天」而不是「还剩 N 天」。
