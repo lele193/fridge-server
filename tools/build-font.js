@@ -19,17 +19,38 @@ const { loadFont } = require('./ttc.js');
 const ROOT = path.join(__dirname, '..');
 const OUT = path.join(ROOT, 'lib', 'font-atlas.json');
 
-/** 屏幕实际会用到的像素尺寸。多个尺寸各烘焙一份 —— 1bpp 缩放会糊，
- *  所以宁可多占几十 KB，也不要运行时缩放。 */
+/**
+ * 屏幕实际会用到的像素尺寸。多个尺寸各烘焙一份 —— 1bpp 缩放会糊，
+ * 所以宁可多占几十 KB，也不要运行时缩放。
+ *
+ * **32px 是个例外，只装黑条上真会出现的字。**
+ *
+ * 32px 在 lib/screen.js 里只用于顶部反白条（BAR_SIZE / NUM_SIZE /
+ * SUF_SIZE 全是 32），而那条里画的是固定文案：「我家冰箱」「N 样在库」
+ * 「第 N/M 页」。食材名再长也是 20px 画的。
+ *
+ * 实测 32px 每个字 185 字节，是 16px（87 字节）的两倍多。四个字号都装
+ * 3500 字的话，光 32px 一档就要占 660 KB —— 而它只需要二十几个字。
+ * 精简掉之后省下 500 多 KB，**用来把另外三个字号从 627 字扩到 3500 字**
+ * 才是划算的。
+ *
+ * 「32px 够用」的判据：黑条文案里出现的字。改版式时如果给黑条加了
+ * 新的 32px 文案，**记得往 BAR_ONLY_CHARS 里补**，否则那个字在黑条上
+ * 会显示成空白（而在别处正常，因为别处字号有全字库）。
+ */
 const SIZES = [16, 20, 24, 32];
+
+/** 只在 32px 上烘焙的字符（顶部黑条会出现的字）。 */
+const BAR_ONLY_CHARS =
+  '我家冰箱样在库第页共总计有大小盒袋瓶份只个条零一二三四五六七八九十页码第几';
 
 /** 超采样倍数。4×4 采样让斜边和曲线不至于出现明显的台阶。 */
 const SS = 4;
 
 // ────────────────────────── 读字符集 ──────────────────────────
 
-function readCharset() {
-  const file = path.join(__dirname, 'charset.txt');
+function readCharset(size) {
+  const file = path.join(ROOT, 'tools', 'charset.txt');
   const chars = new Set();
 
   // ASCII 可打印范围固定包含：屏幕要显示日期、数量、配对码。
@@ -42,6 +63,18 @@ function readCharset() {
       if (ch === ' ' || ch === '\t') continue;
       chars.add(ch);
     }
+  }
+
+  /* 32px 只留黑条字（见 BAR_ONLY_CHARS 的注释）。
+   *
+   * 但**黑条上的字必须在 charset.txt 里存在过** —— 不然 BAR_ONLY_CHARS
+   * 凭空加的字会漏掉别的字号。所以先全部加上，再按字号裁掉。 */
+  if (size === 32) {
+    for (const ch of BAR_ONLY_CHARS) chars.add(ch);
+    return [...chars].filter((c) => {
+      if (c === ' ' || /[\x00-\x7f]/.test(c)) return true;   // ASCII 留着
+      return BAR_ONLY_CHARS.includes(c);
+    });
   }
   return [...chars];
 }
@@ -182,13 +215,14 @@ function build() {
   const fontFile = process.argv[2] || '/System/Library/Fonts/STHeiti Medium.ttc';
   const fontIndex = Number(process.argv[3] || 1);
   const { font } = loadFont(fontFile, fontIndex);
-  const chars = readCharset();
+
 
   console.error(`字体: ${fontFile} #${fontIndex}  字形数 ${font.numGlyphs}`);
-  console.error(`字符集: ${chars.length} 个字符 × ${SIZES.length} 个尺寸`);
 
   const atlas = {};
   for (const size of SIZES) {
+    const chars = readCharset(size);
+    console.error(`  ${size}px: ${chars.length} 个字符`);
     const scale = size / font.unitsPerEm;
 
     // 基线度量先定：整个点阵盒子的高度由 ascender+descender 决定。

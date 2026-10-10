@@ -49,10 +49,22 @@ function allTexts() {
   return out;
 }
 
-/** 命令行给的额外文本：直接传的参数，或 --file 指定的文件（每行一段） */
-function extraTexts() {
+/**
+ * 命令行给的额外文本：直接传的参数，或 --file 指定的文件（每行一段）。
+ *
+ * `--db` 会去线上把所有食材名拉下来一起查。
+ *
+ * **为什么需要它。** 这个工具查的是「**版式里写死的文案**」，而食材名
+ * 是用户自己加的 —— 汤圆、八宝饭、纳豆这些字本来一个字都不在库里，
+ * 而工具报「所有待画文本的字都在字模里」。它说的是真的（版式文案确实齐），
+ * 但没用：真正会让屏幕显示成空白的那部分文字，它根本没看。
+ *
+ * 「报齐」和「够用」是两件事。**守卫必须查真正会上屏的东西。**
+ */
+async function extraTexts() {
   const argv = process.argv.slice(2);
   const out = [];
+  if (argv.includes('--db')) out.push(...(await dbItemNames()));
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--file') {
       const f = argv[i + 1];
@@ -69,16 +81,50 @@ function extraTexts() {
   return out.filter((s) => s.length);
 }
 
-function main() {
+/** 从线上把所有食材名拉下来（--db）。拉不到就跳过，不让工具因为网络失败。 */
+async function dbItemNames() {
+  const BASE = process.env.FRIDGE_CLOUD_BASE
+    || 'https://fridge-server-production.up.railway.app';
+  const DEV = process.env.FRIDGE_DEVICE_ID || 'dev44b176db4fdc';
+  try {
+    const crypto = require('crypto');
+    const pr = await (await fetch(BASE + '/device/pair', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId: DEV }),
+    })).json();
+    const names = new Set();
+    for (let pg = 1; pg <= 20; pg++) {
+      const t = String(Date.now());
+      const sig = crypto.createHmac('sha256', pr.deviceSecret)
+        .update(t + 'GET/sync' + '').digest('hex');
+      const r = await (await fetch(
+        `${BASE}/device/sync?rev=0&hash=&page=${pg}&battery=100&power=usb`,
+        { headers: { Authorization: `HMAC ${DEV}:${t}:${sig}` } },
+      )).json();
+      if (!r.items || !r.items.length) break;
+      r.items.forEach((i) => names.add(i.name));
+    }
+    console.log(`从线上取了 ${names.size} 个食材名`);
+    return [...names];
+  } catch (e) {
+    console.error(`--db 拉取失败（${e.message}），跳过`);
+    return [];
+  }
+}
+
+async function main() {
   const font = atlas['20'] || atlas[Object.keys(atlas)[0]];
   if (!font) {
     console.error('字模是空的，先跑 npm run build:font');
     process.exit(1);
   }
 
-  const texts = allTexts().concat(extraTexts());
-  if (extraTexts().length) {
-    console.log(`额外检查命令行给的 ${extraTexts().length} 段文本`);
+  /* 只取一次：原来调了三次 extraTexts()，加了 async 之后每次都会
+   * 重新拉一次数据库。 */
+  const extra = await extraTexts();
+  const texts = allTexts().concat(extra);
+  if (extra.length) {
+    console.log(`额外检查命令行给的 ${extra.length} 段文本`);
   }
 
   const missing = new Map();
@@ -105,4 +151,4 @@ function main() {
   process.exit(1);
 }
 
-main();
+main().catch((e) => { console.error(e); process.exit(1); });
