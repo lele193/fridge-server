@@ -162,6 +162,47 @@ test('shop 支持顿号/逗号分隔的字符串', async () => {
   assert.ok(list.some((i) => i.name === '鸡蛋'));
 });
 
+test('/web/buy 的 boughtItemId 必须是 id 或 null，不能是时间戳', async () => {
+  /* 回归：setShoppingStatus 的第 4 参数是 bought_item_id（INTEGER），
+   * 原来传的是 now（1.79e12）→ 溢出 → 真 Postgres 报 500。
+   *
+   * 用**独立的 repo**，不碰共享那个 —— 之前这版测试改了共享 repo 的
+   * 方法，导致后面的用例行为变了，是测试自己造的假失败。
+   *
+   * 拦截 setShoppingStatus 看实际传了什么，比断言「接口返回 200」
+   * 强：后者在内存库里恒过，完全抓不住类型错误。 */
+  const { createRepo } = require('../lib/repo');
+  const repo = await createRepo({ memory: true });
+  await repo.upsertDevice('dev-web', { householdId: 'hh-b', deviceSecret: 's' });
+
+  const seen = [];
+  const real = repo.setShoppingStatus.bind(repo);
+  repo.setShoppingStatus = async (hid, id, status, boughtItemId) => {
+    seen.push({ id, status, boughtItemId });
+    return real(hid, id, status, boughtItemId);
+  };
+
+  await repo.addShopping('hh-b', { name: '待买项', qty: 1, unit: '份' }, Date.now());
+  const list = await repo.listShopping('hh-b', 'pending');
+
+  const web = require('../lib/web');
+  const r = await web.handle(
+    { path: '/web/buy', body: { id: String(list[0].id) }, query: {}, headers: { 'x-token': 'test-token' } },
+    repo,
+  );
+
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.strictEqual(seen.length, 1, '应该调了一次 setShoppingStatus');
+  assert.strictEqual(seen[0].status, 'bought');
+
+  /* 关键断言：第 4 参数不能是时间戳。
+   * INTEGER 上限 2147483647，而 now ≈ 1.79e12，差三个数量级。 */
+  const arg = seen[0].boughtItemId;
+  assert.ok(arg === null || typeof arg === 'string',
+    `boughtItemId 必须是 id 或 null，实际是 ${JSON.stringify(arg)}（${typeof arg}）`);
+  assert.ok(arg !== Date.now(), 'boughtItemId 不该是时间戳');
+});
+
 test('未知接口返回 404，不是 500', async () => {
   const r = await call('GET', '/web/nope');
   assert.strictEqual(r.status, 404);
