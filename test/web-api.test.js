@@ -167,6 +167,37 @@ test('未知接口返回 404，不是 500', async () => {
   assert.strictEqual(r.status, 404);
 });
 
+test('没配 WEB_TOKEN 时一律拒绝 —— 哪怕带了任意 token', async () => {
+  // 回归：判据写成 `token !== (WEB_TOKEN || '')` 时，WEB_TOKEN 没配
+  // 就等于「任何非空 token 都对」。实测线上就是这个行为。
+  const saved = process.env.WEB_TOKEN;
+  delete process.env.WEB_TOKEN;
+  try {
+    for (const tk of ['anything', 'wrong', '1234', 'x']) {
+      const r = await call('GET', '/web/fridge', undefined, tk);
+      assert.strictEqual(r.status, 401, `token=${tk} 时不该放行`);
+    }
+    // 连空 token 也拒
+    assert.strictEqual((await call('GET', '/web/fridge', undefined, null)).status, 401);
+  } finally {
+    if (saved !== undefined) process.env.WEB_TOKEN = saved;
+  }
+});
+
+test('未配置与密码错误要说不同的话 —— 否则看不出真实原因', async () => {
+  const saved = process.env.WEB_TOKEN;
+  delete process.env.WEB_TOKEN;
+  try {
+    const unconfigured = JSON.parse((await call('GET', '/web/fridge', undefined, 'x')).body).error;
+    process.env.WEB_TOKEN = 'right-token';
+    const wrong = JSON.parse((await call('GET', '/web/fridge', undefined, 'x')).body).error;
+    assert.notStrictEqual(unconfigured, wrong, '两种情况应给不同的提示');
+    assert.match(unconfigured, /WEB_TOKEN/);
+  } finally {
+    process.env.WEB_TOKEN = saved;
+  }
+});
+
 test('设备端 /healthz 不受网页端 token 影响', async () => {
   const r = await call('GET', '/healthz', undefined, null);
   assert.strictEqual(r.status, 200);
