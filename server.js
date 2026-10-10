@@ -186,6 +186,16 @@ async function handle(req, repo) {
         pgVars: Object.keys(process.env)
           .filter((k) => /^PG|POSTGRES|DATABASE/i.test(k))
           .sort(),
+        /* 网页端相关变量。**只报「有没有」不报值** ——
+         * WEB_TOKEN 是密码，值打出来等于贴到日志里。
+         *
+         * 诊断价值：之前 WEB_DEVICE_ID 没生效时，只能猜「是加错了服务
+         * 还是名字打错了」。列出「配了哪些、值是不是空」，一眼就分清
+         * 「变量没进到进程」和「进了但内容不对」。 */
+        webVars: {
+          tokenSet: Boolean(process.env.WEB_TOKEN),
+          deviceIdSet: Boolean(process.env.WEB_DEVICE_ID),
+        },
         service: process.env.RAILWAY_SERVICE_NAME || '',
         project: process.env.RAILWAY_PROJECT_NAME || '',
         uptimeSec: Math.round(process.uptime()),
