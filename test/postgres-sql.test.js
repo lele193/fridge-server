@@ -149,6 +149,30 @@ test('postgresRepo：建表语句自己就是列名白名单', async () => {
   assert.deepStrictEqual(pg.violations, [], '建表阶段不该有列名问题');
 });
 
+test('已有数据库缺列时必须补 ALTER —— CREATE TABLE IF NOT EXISTS 不会加列', async () => {
+  /* 回归：`shopping.bought_item_id` 是后加的，而线上数据库是在那之前建的。
+   *
+   * **`CREATE TABLE IF NOT EXISTS` 对已存在的表是整条跳过** —— 表在，
+   * 语句不执行，于是新加进 CREATE 语句的列对老库完全不生效。
+   * 症状：setShoppingStatus 报 500（column does not exist），
+   * 而 listShopping 正常（它不 SELECT 那一列）。
+   *
+   * 只有真 Postgres 才暴露，内存库和「查 CREATE 语句里有没有这列」
+   * 的测试都测不出来 —— 那种测试恰恰会给出虚假的安心感。
+   */
+  const pg = fakePg();
+  const repo = postgresRepo(pg.pg);
+  await repo.init();
+
+  const alter = pg.statements.find((q) => /ALTER\s+TABLE\s+shopping\s+ADD\s+COLUMN/i.test(q));
+  assert.ok(alter, 'init() 必须有一条给 shopping 补列的 ALTER TABLE');
+
+  // 必须是「有则跳过」的写法，否则每次启动都执行
+  assert.ok(/DO\s+\$\$/i.test(alter), '补列应在 DO $$ 块里，列存在时跳过');
+  assert.ok(/information_schema\.columns/i.test(alter),
+    '要查 information_schema 才知道列在不在');
+});
+
 test('postgresRepo：upsertDevice 的两条分支列名都要在白名单里', async () => {
   /* 分支一：设备已存在 → UPDATE devices SET ... */
   const upd = fakePg({ deviceExists: true });
