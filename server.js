@@ -21,6 +21,12 @@ const { URL } = require('url');
 
 const auth = require('./lib/auth');
 const endpoints = require('./lib/endpoints');
+const fs = require('fs');
+const path = require('path');
+const web = require('./lib/web');
+
+/* 网页首页。放在 public/ 下，单文件、无构建步骤。 */
+const PUBLIC_INDEX = path.join(__dirname, 'public', 'index.html');
 const { createRepo } = require('./lib/repo');
 
 /** 固件 net.c 的 BODY_MAX 是 256KB，这里留一点余量 */
@@ -108,6 +114,52 @@ async function handle(req, repo) {
     url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   } catch {
     return { status: 400, body: { error: 'URL 无法解析' } };
+  }
+
+  /* 网页首页。**直接读文件，不引静态文件中间件** ——
+   * 就一个页面，serve 一个文件而已，express.static 那套是杀鸡用牛刀。
+   * 每次读盘而不是缓存：改完 index.html 刷新就生效，不用重启进程。
+   *
+   * 返回 raw 而不是 JSON：handle 的契约是「返回响应描述」，
+   * 写响应是 createServer 的事 —— 首页是 HTML，不能走 sendJson。
+   * handle() 拿不到 res，所以这条路不能自己写响应。 */
+  if (url.pathname === '/' || url.pathname === '/index.html') {
+    try {
+      const html = fs.readFileSync(PUBLIC_INDEX, 'utf8');
+      return {
+        status: 200,
+        raw: html,
+        headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+      };
+    } catch (e) {
+      return { status: 500, body: { error: `读不到网页: ${e.message}` } };
+    }
+  }
+
+  /* 网页端请求：走自己那套 token 鉴权，不进设备端的 HMAC 分支。 */
+  if (url.pathname === '/web' || url.pathname.startsWith('/web/')) {
+    let body = {};
+    if (req.method === 'POST') {
+      /* readRawBody 返回 {raw, truncated}，不是字符串本身 ——
+       * 拿返回值直接 JSON.parse 会变成 parse("[object Object]")，
+       * 报错信息还很难懂。 */
+      const { raw } = await readRawBody(req);
+      if (raw) {
+        try {
+          body = JSON.parse(raw);
+        } catch (e) {
+          return { status: 400, body: { error: `请求体不是合法 JSON: ${e.message}` } };
+        }
+      }
+    }
+    const ctx2 = {
+      method: req.method,
+      path: url.pathname,
+      body,
+      query: Object.fromEntries(url.searchParams.entries()),
+      headers: req.headers,
+    };
+    return web.handle(ctx2, repo);
   }
 
   /* 健康检查。**免鉴权、只回仓库类型，不泄露任何业务数据。**
@@ -240,6 +292,18 @@ function createServer(repo) {
         return;
       }
       if (r.status === 304) return send304(res, r.nextPollSec);
+      /* raw = 非 JSON 的响应（目前只有网页首页的 HTML）。
+       * 走这里而不是让 handle 自己 res.end() —— handle 拿不到 res，
+       * 而且混进「谁写响应」会破坏「handle 只返回描述」这个契约。 */
+      if (r.raw !== undefined) {
+        const buf = Buffer.from(r.raw, 'utf8');
+        res.writeHead(r.status, {
+          'Content-Length': buf.length,
+          ...(r.headers || {}),
+        });
+        res.end(buf);
+        return;
+      }
       sendJson(res, r.status, r.body, r.headers);
     } catch (err) {
       console.error('[server] 未捕获异常:', err);
