@@ -14,6 +14,7 @@ const crypto = require('crypto');
 
 const { createRepo, memoryRepo } = require('../lib/repo');
 const auth = require('../lib/auth');
+const { nextPollSeconds } = require('../lib/endpoints');
 
 const DEVICE_ID = 'dev001122334455';
 const FW = '1.0.0';
@@ -145,7 +146,17 @@ test('真实 socket：304 无 body 且带 X-Next-Poll', async (t) => {
   const second = await mk({ rev: String(first.body.rev), battery: '90', power: 'bat', hash: first.body.screen.hash });
   assert.strictEqual(second.status, 304);
   assert.strictEqual(second.text, '', '304 不能有 body');
-  assert.strictEqual(second.headers['x-next-poll'], '180');
+  const poll = Number(second.headers['x-next-poll']);
+  assert.ok(poll >= 60 && poll <= 86400, `X-Next-Poll 应在 60..86400，实际 ${poll}`);
+});
+
+test('nextPollSeconds 对齐到本地零点（UTC+8）', () => {
+  // 2026-10-24 15:59:00 UTC = 23:59 本地 → 距零点 60 秒 + 120 秒余量
+  assert.strictEqual(nextPollSeconds(Date.UTC(2026, 9, 24, 15, 59, 0)), 180);
+  // 16:00:30 UTC = 00:00:30 本地 → 距下一个零点 86370 + 120，钳到 86400
+  assert.strictEqual(nextPollSeconds(Date.UTC(2026, 9, 24, 16, 0, 30)), 86400);
+  // 03:00:00 UTC = 11:00 本地 → 距零点 13 小时 = 46800 + 120
+  assert.strictEqual(nextPollSeconds(Date.UTC(2026, 9, 24, 3, 0, 0)), 46800 + 120);
 });
 
 test('真实 socket：shop 的 added 是数组（固件按数组计数）', async (t) => {
