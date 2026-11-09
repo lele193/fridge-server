@@ -241,6 +241,12 @@ body {
 const API = window.location.origin;
 let token = localStorage.getItem('fridge_token') || '';
 
+/* 和服务端 screen.js 同一套「第几天」算法：压到本地零点再相减。
+ * 时区固定 UTC+8（板级 TZ=CST-8，服务端也是 480 分钟）。 */
+const DAY_MS = 86400000;
+const TZ_OFFSET_MS = 8 * 3600000;
+const startOfLocalDay = (ms) => Math.floor((ms + TZ_OFFSET_MS) / DAY_MS) * DAY_MS - TZ_OFFSET_MS;
+
 // 检查 token
 if (!token) {
   showTokenInput();
@@ -306,7 +312,13 @@ async function loadFridge() {
   }
 
   list.innerHTML = data.items.map(item => {
-    const days = item.expireAt ? Math.ceil((item.expireAt - Date.now()) / 86400000) : null;
+    /* 天数和屏幕端用同一套算法：按**本地日历日**算，不按满 24 小时。
+     * 这样「还剩 N 天」总在零点跳变，和设备每天零点的同步对齐；
+     * 用 ceil((expireAt-now)/86400000) 的话会在下午的某个钟点跳变，
+     * 屏幕和网页会差一天。 */
+    const days = item.expireAt
+      ? Math.round((startOfLocalDay(item.expireAt) - startOfLocalDay(Date.now())) / DAY_MS)
+      : null;
     let statusClass = 'item-normal';
     let statusText = '';
     if (days !== null) {
@@ -314,7 +326,7 @@ async function loadFridge() {
       else if (days <= 3) { statusClass = 'item-soon'; statusText = `还剩 ${days} 天`; }
       else { statusText = `还剩 ${days} 天`; }
     } else {
-      statusText = `放了 ${Math.floor((Date.now() - item.createdAt) / 86400000)} 天`;
+      statusText = `放了 ${Math.max(0, Math.round((startOfLocalDay(Date.now()) - startOfLocalDay(item.createdAt)) / DAY_MS))} 天`;
     }
     return `
       <div class="card">

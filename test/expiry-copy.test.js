@@ -111,8 +111,11 @@ test('已过期 → 反白标签，不走「还剩」那一档', () => {
 });
 
 test('今天到期（days = 0）算「还剩 0 天」而不是「已过期」', () => {
-  const today = hashOf([mk({ expireAt: NOW + 3600000 })]);   // 还剩 1 小时
-  const expired = hashOf([mk({ expireAt: NOW - 3600000 })]); // 过了 1 小时
+  /* 2026-11-10 改：天数额按**本地日历日**算，所以判据是「到期日是不是今天」，
+   * 不是「还剩几小时」。用昨天零点当已过期样本、今天零点当今天到期样本。 */
+  const { startOfLocalDay } = require('../lib/screen');
+  const today = hashOf([mk({ expireAt: startOfLocalDay(NOW) })]);        // 今天零点 → 0 天
+  const expired = hashOf([mk({ expireAt: startOfLocalDay(NOW) - DAY })]); // 昨天零点 → -1 天
   assert.notStrictEqual(today, expired, '今天到期和已经过期是两回事');
 });
 
