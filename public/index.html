@@ -323,6 +323,7 @@ async function loadFridge() {
     let statusText = '';
     if (days !== null) {
       if (days < 0) { statusClass = 'item-expired'; statusText = `已过期 ${Math.abs(days)} 天`; }
+      else if (days === 0) { statusClass = 'item-soon'; statusText = '今天到期'; }
       else if (days <= 3) { statusClass = 'item-soon'; statusText = `还剩 ${days} 天`; }
       else { statusText = `还剩 ${days} 天`; }
     } else {
