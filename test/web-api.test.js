@@ -102,14 +102,22 @@ test('add 的 body 是被正确解析的（不是 "[object Object]"）', async (
   assert.ok(!r.body.includes('object Object'));
 });
 
-test('没设保质期时存的是 NO_EXPIRY，不是 0', async () => {
-  // 0 会被 repo.addItem 归一成 NO_EXPIRY（9999 年）。
-  // 存 0 本身没问题，但**必须能过范围检查**（1e12~4e12 毫秒），
-  // 否则渲染时会被当成 1970 年。
+test('没设保质期时，/web/fridge 不会把 9999 年当成到期日透出去', async () => {
+  /* 存储层用 NO_EXPIRY（9999-12-31）当哨兵，是为了让 SQL 里
+   * `ORDER BY expire_at` 自然把「没设保质期」排到最后。
+   *
+   * 但**展示层不能看到这个哨兵**：带上时分秒一减，页面就成了一整屏
+   * 「还剩 2912130 天」。所以 /web/fridge 统一翻成 0（= 没设），
+   * 前端和屏幕端的 `!expireAt` 判据才成立。
+   *
+   * 0 本身是安全的：daysLeft(0) 返回 null，屏幕走「放了 N 天」，
+   * 不会再出现当年那个「1970 年、已过期两万多天」。 */
   const r = await call('GET', '/web/fridge');
   const it = JSON.parse(r.body).items.find((i) => i.name === '粽子');
   const exp = Number(it.expireAt);
-  assert.ok(exp >= 1e12, `expireAt=${exp} 不在毫秒时间戳范围内`);
+  assert.ok(exp === 0 || (exp >= 1e12 && exp < 4e12),
+    `expireAt=${exp} 既不是「没设」也不是合理的时间戳`);
+  assert.ok(exp < 253402300799000, 'NO_EXPIRY 哨兵不该出现在展示接口里');
 });
 
 test('POST /web/eat 标记吃完后从清单消失', async () => {
